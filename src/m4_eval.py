@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Module 4: RAGAS Evaluation — 4 metrics + failure analysis."""
 
-import os, sys, json
+import os, sys, json, math
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
@@ -60,8 +60,43 @@ def evaluate_ragas(questions: list[str], answers: list[str],
     # except Exception as e:
     #     print(f"  ⚠️  RAGAS evaluation failed: {e}")
     #     return zeros
-    return {"faithfulness": 0.0, "answer_relevancy": 0.0,
-            "context_precision": 0.0, "context_recall": 0.0, "per_question": []}
+    try:
+        from ragas import evaluate
+        from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+        from datasets import Dataset
+
+        dataset = Dataset.from_dict({
+            "question": questions, "answer": answers,
+            "contexts": contexts, "ground_truth": ground_truths,
+        })
+        result = evaluate(dataset, metrics=[faithfulness, answer_relevancy,
+                                            context_precision, context_recall])
+        df = result.to_pandas()
+
+        per_question = [
+            EvalResult(question=row["question"], answer=row["answer"],
+                       contexts=list(row["contexts"]), ground_truth=row["ground_truth"],
+                       **{m: _safe_float(row.get(m)) for m in METRICS})
+            for _, row in df.iterrows()
+        ]
+        # Aggregate bỏ qua NaN (RAGAS trả NaN khi LLM judge parse lỗi) thay vì kéo điểm về 0
+        aggregate = {m: _safe_float(df[m].mean()) if m in df else 0.0 for m in METRICS}
+        return {**aggregate, "per_question": per_question}
+    except Exception as e:
+        print(f"  ⚠️  RAGAS evaluation failed: {e}")
+        return {**{m: 0.0 for m in METRICS}, "per_question": []}
+
+
+METRICS = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+
+
+def _safe_float(value) -> float:
+    """Convert sang float, NaN/None → 0.0."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if math.isnan(f) else f
 
 
 def failure_analysis(eval_results: list[EvalResult], bottom_n: int = 10) -> list[dict]:
@@ -77,7 +112,29 @@ def failure_analysis(eval_results: list[EvalResult], bottom_n: int = 10) -> list
     # 3. Sort by avg ascending → take bottom_n
     # 4. Return [{"question": ..., "worst_metric": ..., "score": ...,
     #             "diagnosis": ..., "suggested_fix": ...}]
-    return []
+    diagnostic_tree = {
+        "faithfulness": ("LLM hallucinating", "Tighten prompt, lower temperature"),
+        "context_recall": ("Missing relevant chunks", "Improve chunking or add BM25"),
+        "context_precision": ("Too many irrelevant chunks", "Add reranking or metadata filter"),
+        "answer_relevancy": ("Answer doesn't match question", "Improve prompt template"),
+    }
+
+    analyzed = []
+    for r in eval_results:
+        scores = {m: getattr(r, m) for m in METRICS}
+        worst_metric = min(scores, key=scores.get)
+        diagnosis, suggested_fix = diagnostic_tree[worst_metric]
+        analyzed.append({
+            "question": r.question,
+            "avg_score": round(sum(scores.values()) / len(scores), 4),
+            "worst_metric": worst_metric,
+            "score": round(scores[worst_metric], 4),
+            "diagnosis": diagnosis,
+            "suggested_fix": suggested_fix,
+        })
+
+    analyzed.sort(key=lambda x: x["avg_score"])
+    return analyzed[:bottom_n]
 
 
 def save_report(results: dict, failures: list[dict], path: str = "reports/ragas_report.json"):

@@ -17,6 +17,20 @@ from src.m4_eval import load_test_set, evaluate_ragas, failure_analysis, save_re
 from src.m5_enrichment import enrich_chunks
 from config import RERANK_TOP_K
 
+_llm_client = None
+
+
+def _document_header(text: str, source: str) -> str:
+    """Tiêu đề H1 + dòng phiên bản ("> Phiên bản: ... | Trạng thái: ...") của tài liệu.
+
+    Dùng làm contextual prepend thay cho câu context do LLM sinh: không tốn API và
+    phân biệt được các phiên bản (vd. mat_khau_v1 "ĐÃ THAY THẾ" vs v2 "hiện hành").
+    """
+    lines = [l.strip() for l in text.splitlines()[:5]]
+    title = next((l.lstrip("# ") for l in lines if l.startswith("# ")), source)
+    version = next((l.lstrip("> ") for l in lines if l.startswith(">")), "")
+    return f"{title} | {version}" if version else title
+
 
 def build_pipeline():
     """Build production RAG pipeline."""
@@ -29,27 +43,49 @@ def build_pipeline():
     print("\n[1/4] Chunking documents...", flush=True)
     docs = load_documents()
     all_chunks = []
+    parent_texts = {}  # parent_key → parent text (để swap child → parent lúc query)
+    doc_headers = []   # header tài liệu tương ứng từng child
     for doc in docs:
+        source = doc["metadata"].get("source", "")
+        header = _document_header(doc["text"], source)
         parents, children = chunk_hierarchical(doc["text"], metadata=doc["metadata"])
+        # parent_id ("parent_0", ...) chỉ unique trong 1 tài liệu → ghép thêm source
+        for p in parents:
+            parent_texts[f"{source}::{p.metadata['parent_id']}"] = p.text
         for child in children:
-            all_chunks.append({"text": child.text, "metadata": {**child.metadata, "parent_id": child.parent_id}})
-    print(f"  ✓ {len(all_chunks)} chunks from {len(docs)} documents ({time.time()-t0:.1f}s)", flush=True)
+            all_chunks.append({"text": child.text,
+                               "metadata": {**child.metadata, "parent_id": child.parent_id,
+                                            "parent_key": f"{source}::{child.parent_id}"}})
+            doc_headers.append(header)
+    print(f"  ✓ {len(all_chunks)} child chunks, {len(parent_texts)} parents "
+          f"from {len(docs)} documents ({time.time()-t0:.1f}s)", flush=True)
 
     # Step 2: Enrichment (M5)
+    # Text để index = header tài liệu + child + HyQA questions. Không dùng context line do LLM
+    # sinh (quá chung chung, không phân biệt phiên bản). LLM chỉ nhìn thấy parent text nên
+    # header / questions ở đây chỉ phục vụ retrieval.
     t0 = time.time()
     print(f"\n[2/4] Enriching {len(all_chunks)} chunks (M5, 1 API call/chunk)...", flush=True)
     enriched = enrich_chunks(all_chunks)
     if enriched:
-        all_chunks = [{"text": e.enriched_text, "metadata": e.auto_metadata} for e in enriched]
+        all_chunks = []
+        for e, header in zip(enriched, doc_headers):
+            text = f"{header}\n\n{e.original_text}"
+            if e.hypothesis_questions:
+                text += "\n\n" + "\n".join(e.hypothesis_questions)
+            all_chunks.append({"text": text, "metadata": e.auto_metadata})
         print(f"  ✓ Enriched {len(enriched)} chunks ({time.time()-t0:.1f}s)", flush=True)
     else:
         print("  ⚠️  M5 not implemented — using raw chunks", flush=True)
+        all_chunks = [{"text": f"{h}\n\n{c['text']}", "metadata": c["metadata"]}
+                      for c, h in zip(all_chunks, doc_headers)]
 
     # Step 3: Index (M2)
     t0 = time.time()
     print(f"\n[3/4] Indexing {len(all_chunks)} chunks (BM25 + Dense)...", flush=True)
     search = HybridSearch()
     search.index(all_chunks)
+    search.parent_texts = parent_texts
     print(f"  ✓ Indexed ({time.time()-t0:.1f}s)", flush=True)
 
     # Step 4: Reranker (M3)
@@ -65,17 +101,30 @@ def run_query(query: str, search: HybridSearch, reranker: CrossEncoderReranker) 
     """Run single query through pipeline."""
     results = search.search(query)
     docs = [{"text": r.text, "score": r.score, "metadata": r.metadata} for r in results]
-    reranked = reranker.rerank(query, docs, top_k=RERANK_TOP_K)
-    contexts = [r.text for r in reranked] if reranked else [r.text for r in results[:3]]
+    # Rerank toàn bộ candidates (child) rồi lấy top-K parent khác nhau:
+    # retrieve bằng child (precision) → đưa parent cho LLM (đủ context, không bị cắt giữa bảng/section)
+    reranked = reranker.rerank(query, docs, top_k=len(docs)) or results
+    parent_texts = getattr(search, "parent_texts", {})
+    contexts = []
+    for hit in reranked:
+        context = parent_texts.get(hit.metadata.get("parent_key"), hit.text)
+        if context not in contexts:
+            contexts.append(context)
+        if len(contexts) == RERANK_TOP_K:
+            break
 
     from config import OPENAI_API_KEY
     if OPENAI_API_KEY and contexts:
         try:
-            from openai import OpenAI
-            client = OpenAI()
-            context_str = "\n\n".join(contexts)
-            resp = client.chat.completions.create(model="gpt-4o-mini", messages=[
-                {"role": "system", "content": "Trả lời CHỈ dựa trên context. Nếu không có → nói 'Không tìm thấy.'"},
+            global _llm_client
+            if _llm_client is None:
+                from openai import OpenAI
+                _llm_client = OpenAI()
+            context_str = "\n\n---\n\n".join(contexts)
+            resp = _llm_client.chat.completions.create(model="gpt-4o-mini", temperature=0, messages=[
+                {"role": "system", "content": "Trả lời CHỈ dựa trên context. Nếu context nói rõ là KHÔNG được / KHÔNG cần "
+                                              "thì trả lời 'Không' kèm trích dẫn quy định. Chỉ nói 'Không tìm thấy.' "
+                                              "khi context hoàn toàn không đề cập đến vấn đề được hỏi."},
                 {"role": "user", "content": f"Context:\n{context_str}\n\nCâu hỏi: {query}"},
             ])
             answer = resp.choices[0].message.content

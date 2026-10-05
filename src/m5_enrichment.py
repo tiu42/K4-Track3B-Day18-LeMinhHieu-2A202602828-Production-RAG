@@ -18,6 +18,26 @@ from dataclasses import dataclass, field
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import OPENAI_API_KEY
 
+LLM_MODEL = "gpt-4o-mini"
+_client = None
+
+
+def _chat(system: str, user: str, max_tokens: int, json_mode: bool = False) -> str:
+    """Gọi OpenAI chat completion (dùng chung 1 client). Raise nếu lỗi để caller fallback."""
+    global _client
+    if _client is None:
+        from openai import OpenAI
+        _client = OpenAI(api_key=OPENAI_API_KEY)
+    kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+    resp = _client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_tokens=max_tokens,
+        temperature=0,
+        **kwargs,
+    )
+    return resp.choices[0].message.content.strip()
+
 
 @dataclass
 class EnrichedChunk:
@@ -58,7 +78,16 @@ def summarize_chunk(text: str) -> str:
     # Extractive fallback (không cần API):
     # sentences = [s.strip() for s in text.replace("\n", " ").split(". ") if s.strip()]
     # return ". ".join(sentences[:2]) + "." if sentences else text
-    return text
+    if OPENAI_API_KEY:
+        try:
+            return _chat("Tóm tắt đoạn văn sau trong 2-3 câu ngắn gọn bằng tiếng Việt.",
+                         text, max_tokens=150)
+        except Exception as e:
+            print(f"  ⚠️  OpenAI summarize failed: {e}")
+
+    # Extractive fallback (không cần API): lấy 2 câu đầu
+    sentences = [s.strip().rstrip(".") for s in text.replace("\n", " ").split(". ") if s.strip()]
+    return ". ".join(sentences[:2]) + "." if sentences else text
 
 
 # ─── Technique 2: Hypothesis Question-Answer (HyQA) ─────
@@ -91,7 +120,20 @@ def generate_hypothesis_questions(text: str, n_questions: int = 3) -> list[str]:
     # import re
     # sentences = [s.strip() for s in re.split(r'[.!?\n]', text) if len(s.strip()) > 10]
     # return [f"{s.rstrip('.')}?" for s in sentences[:n_questions]]
-    return []
+    if OPENAI_API_KEY:
+        try:
+            content = _chat(f"Dựa trên đoạn văn, tạo {n_questions} câu hỏi mà đoạn văn có thể trả lời. "
+                            "Trả về mỗi câu hỏi trên 1 dòng, không đánh số.",
+                            text, max_tokens=200)
+            questions = [q.strip().lstrip("0123456789.-) ").strip() for q in content.split("\n")]
+            return [q for q in questions if q][:n_questions]
+        except Exception as e:
+            print(f"  ⚠️  OpenAI HyQA failed: {e}")
+
+    # Extractive fallback: biến câu thành dạng hỏi
+    import re
+    sentences = [s.strip() for s in re.split(r'[.!?\n]', text) if len(s.strip()) > 10]
+    return [f"{s.rstrip('.')}?" for s in sentences[:n_questions]]
 
 
 # ─── Technique 3: Contextual Prepend (Anthropic style) ──
@@ -123,7 +165,18 @@ def contextual_prepend(text: str, document_title: str = "") -> str:
     # Simple fallback:
     # prefix = f"Trích từ {document_title}. " if document_title else ""
     # return f"{prefix}{text}"
-    return text
+    if OPENAI_API_KEY:
+        try:
+            context = _chat("Viết 1 câu ngắn mô tả đoạn văn này nằm ở đâu trong tài liệu "
+                            "và nói về chủ đề gì. Chỉ trả về 1 câu.",
+                            f"Tài liệu: {document_title}\n\nĐoạn văn:\n{text}", max_tokens=80)
+            return f"{context}\n\n{text}"
+        except Exception as e:
+            print(f"  ⚠️  OpenAI contextual failed: {e}")
+
+    # Simple fallback: chỉ prepend tên tài liệu
+    prefix = f"Trích từ {document_title}. " if document_title else ""
+    return f"{prefix}{text}"
 
 
 # ─── Technique 4: Auto Metadata Extraction ──────────────
@@ -152,7 +205,17 @@ def extract_metadata(text: str) -> dict:
     #         print(f"  ⚠️  OpenAI metadata failed: {e}")
     #
     # return {"topic": "general", "entities": [], "category": "policy", "language": "vi"}
-    return {}
+    if OPENAI_API_KEY:
+        try:
+            import json as _json
+            content = _chat('Trích xuất metadata từ đoạn văn. Trả về JSON: {"topic": "...", '
+                            '"entities": ["..."], "category": "policy|hr|it|finance", "language": "vi|en"}',
+                            text, max_tokens=150, json_mode=True)
+            return _json.loads(content)
+        except Exception as e:
+            print(f"  ⚠️  OpenAI metadata failed: {e}")
+
+    return {"topic": "general", "entities": [], "category": "policy", "language": "vi"}
 
 
 # ─── Combined Single-Call Mode ───────────────────────────
@@ -186,6 +249,20 @@ def _enrich_single_call(text: str, source: str) -> dict:
     #         return _json.loads(resp.choices[0].message.content)
     #     except Exception as e:
     #         print(f"  ⚠️  Enrichment API failed: {e}")
+    if OPENAI_API_KEY:
+        try:
+            import json as _json
+            content = _chat("""Phân tích đoạn văn và trả về JSON:
+{
+  "summary": "tóm tắt 2-3 câu",
+  "questions": ["câu hỏi 1", "câu hỏi 2", "câu hỏi 3"],
+  "context": "1 câu mô tả đoạn văn nằm ở đâu trong tài liệu",
+  "metadata": {"topic": "...", "entities": ["..."], "category": "policy|hr|it|finance", "language": "vi|en"}
+}
+"questions" CHỈ gồm câu hỏi mà đoạn văn trả lời được trực tiếp, không hỏi ngoài nội dung đoạn văn.""", f"Tài liệu: {source}\n\nĐoạn văn:\n{text}", max_tokens=400, json_mode=True)
+            return _json.loads(content)
+        except Exception as e:
+            print(f"  ⚠️  Enrichment API failed: {e}")
     return {}
 
 

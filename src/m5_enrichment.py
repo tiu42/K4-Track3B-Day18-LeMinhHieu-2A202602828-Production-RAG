@@ -58,7 +58,6 @@ def summarize_chunk(text: str) -> str:
     Tạo summary ngắn cho chunk.
     Embed summary thay vì (hoặc cùng với) raw chunk → giảm noise.
     """
-    # TODO: Implement chunk summarization
     # if OPENAI_API_KEY:
     #     try:
     #         from openai import OpenAI
@@ -98,7 +97,6 @@ def generate_hypothesis_questions(text: str, n_questions: int = 3) -> list[str]:
     Generate câu hỏi mà chunk có thể trả lời.
     Index cả questions lẫn chunk → query match tốt hơn (bridge vocabulary gap).
     """
-    # TODO: Implement HyQA generation
     # if OPENAI_API_KEY:
     #     try:
     #         from openai import OpenAI
@@ -144,7 +142,6 @@ def contextual_prepend(text: str, document_title: str = "") -> str:
     Prepend context giải thích chunk nằm ở đâu trong document.
     Anthropic benchmark: giảm 49% retrieval failure (alone).
     """
-    # TODO: Implement contextual prepend
     # if OPENAI_API_KEY:
     #     try:
     #         from openai import OpenAI
@@ -186,7 +183,6 @@ def extract_metadata(text: str) -> dict:
     """
     LLM extract metadata tự động: topic, entities, date_range, category.
     """
-    # TODO: Implement auto metadata extraction
     # if OPENAI_API_KEY:
     #     try:
     #         import json as _json
@@ -226,7 +222,6 @@ def _enrich_single_call(text: str, source: str) -> dict:
 
     ⚠️ Cost optimization: 1 API call thay vì 4 calls riêng lẻ.
     """
-    # TODO: Implement combined enrichment (1 call/chunk)
     # if OPENAI_API_KEY:
     #     try:
     #         import json as _json

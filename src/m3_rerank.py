@@ -29,7 +29,6 @@ class CrossEncoderReranker:
 
     def _load_model(self):
         if self._model is None:
-            # TODO: Load cross-encoder model
             # from sentence_transformers import CrossEncoder
             # self._model = CrossEncoder(self.model_name)
             #
@@ -41,7 +40,6 @@ class CrossEncoderReranker:
 
     def rerank(self, query: str, documents: list[dict], top_k: int = RERANK_TOP_K) -> list[RerankResult]:
         """Rerank documents: top-20 → top-k."""
-        # TODO: Implement reranking
         # 1. if not documents: return []
         # 2. model = self._load_model()
         # 3. pairs = [(query, doc["text"]) for doc in documents]
@@ -72,7 +70,6 @@ class FlashrankReranker:
         self._model = None
 
     def rerank(self, query: str, documents: list[dict], top_k: int = RERANK_TOP_K) -> list[RerankResult]:
-        # TODO (optional): from flashrank import Ranker, RerankRequest
         # model = Ranker(); passages = [{"text": d["text"]} for d in documents]
         # results = model.rerank(RerankRequest(query=query, passages=passages))
         if not documents:

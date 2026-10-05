@@ -34,7 +34,6 @@ def load_test_set(path: str = TEST_SET_PATH) -> list[dict]:
 def evaluate_ragas(questions: list[str], answers: list[str],
                    contexts: list[list[str]], ground_truths: list[str]) -> dict:
     """Run RAGAS evaluation."""
-    # TODO: Implement RAGAS evaluation
     # 1. Wrap trong try/except — RAGAS cần OPENAI_API_KEY và Python 3.11+.
     # try:
     #     from ragas import evaluate
@@ -101,7 +100,6 @@ def _safe_float(value) -> float:
 
 def failure_analysis(eval_results: list[EvalResult], bottom_n: int = 10) -> list[dict]:
     """Analyze bottom-N worst questions using Diagnostic Tree."""
-    # TODO: Implement failure analysis
     # 1. diagnostic_tree = {
     #        "faithfulness": ("LLM hallucinating", "Tighten prompt, lower temperature"),
     #        "context_recall": ("Missing relevant chunks", "Improve chunking or add BM25"),
